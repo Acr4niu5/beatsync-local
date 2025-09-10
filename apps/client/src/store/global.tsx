@@ -297,11 +297,41 @@ const getWaitTimeSeconds = (state: GlobalState, targetServerTime: number) => {
 
 const loadAudioSourceUrl = async ({ url }: { url: string }) => {
   const response = await fetch(url);
+
+  // Ensure we received a successful response
+  if (!response.ok) {
+    const body = await response
+      .text()
+      .catch(() => "<failed to read error body>");
+    throw new Error(
+      `Audio fetch failed (${response.status}): ${body.slice(0, 200)}`
+    );
+  }
+
+  const contentType = response.headers.get("content-type") || "";
+  if (
+    contentType &&
+    !contentType.startsWith("audio/") &&
+    !contentType.startsWith("application/octet-stream")
+  ) {
+    // Not fatal (some servers/CDNs omit or set generic type), but useful for debugging
+    console.warn(
+      `Fetching audio with non-audio content-type: ${contentType} from ${url}`
+    );
+  }
+
   const arrayBuffer = await response.arrayBuffer();
-  const audioBuffer = await audioContextManager.decodeAudioData(arrayBuffer);
-  return {
-    audioBuffer,
-  };
+
+  try {
+    const audioBuffer = await audioContextManager.decodeAudioData(arrayBuffer);
+    return { audioBuffer };
+  } catch (err) {
+    throw new Error(
+      `Failed to decode audio data (bytes=${arrayBuffer.byteLength}, content-type=${contentType || "unknown"}) from ${url}: ${String(
+        err
+      )}`
+    );
+  }
 };
 
 const initializationMutex = new Mutex();

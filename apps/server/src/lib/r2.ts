@@ -11,8 +11,29 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { R2_AUDIO_FILE_NAME_DELIMITER } from "@beatsync/shared";
 import { config } from "dotenv";
 import sanitize from "sanitize-filename";
+import path from "path";
+import { promises as fs } from "fs";
+import { statSync } from "fs";
 
 config();
+
+// Provider toggle
+const STORAGE_PROVIDER = (process.env.STORAGE_PROVIDER || "local").toLowerCase() as
+  | "local"
+  | "r2";
+
+function isLocalProvider() {
+  return STORAGE_PROVIDER === "local";
+}
+
+// Local storage directories (resolved relative to apps/server)
+const SERVER_ROOT_DIR = path.resolve(path.join(import.meta.dir, "..", ".."));
+const LOCAL_UPLOADS_DIR = path.join(SERVER_ROOT_DIR, "uploads");
+const LOCAL_BACKUP_DIR = path.join(SERVER_ROOT_DIR, "storage", "state-backup");
+
+async function ensureDir(dir: string) {
+  await fs.mkdir(dir, { recursive: true });
+}
 
 const S3_CONFIG = {
   BUCKET_NAME: process.env.S3_BUCKET_NAME!,
@@ -56,6 +77,19 @@ export async function generatePresignedUploadUrl(
   contentType: string,
   expiresIn: number = 3600 // 1 hour
 ): Promise<string> {
+  if (isLocalProvider()) {
+    // For local, we don't know the absolute origin here; caller should compose absolute URL.
+    // Return a relative path as a hint (caller will prefix the origin).
+    const key = createKey(roomId, fileName);
+    const params = new URLSearchParams({
+      roomId,
+      fileName,
+      contentType,
+      key,
+    });
+    return `/upload/direct?${params.toString()}`;
+  }
+
   const key = createKey(roomId, fileName);
 
   const command = new PutObjectCommand({
@@ -77,6 +111,9 @@ export async function generatePresignedUploadUrl(
 export function getPublicAudioUrl(roomId: string, fileName: string): string {
   // URL encode the filename to handle special characters like #, ?, &, etc.
   const encodedFileName = encodeURIComponent(fileName);
+  if (isLocalProvider()) {
+    return `/media/room-${roomId}/${encodedFileName}`;
+  }
   return `${S3_CONFIG.PUBLIC_URL}/room-${roomId}/${encodedFileName}`;
 }
 
@@ -91,9 +128,14 @@ export function extractKeyFromUrl(url: string): string | null {
     const urlParts = new URL(url);
 
     // Extract the pathname and remove leading slash
-    const pathWithoutLeadingSlash = urlParts.pathname.startsWith("/")
+    let pathWithoutLeadingSlash = urlParts.pathname.startsWith("/")
       ? urlParts.pathname.substring(1)
       : urlParts.pathname;
+
+    // For local provider, our public URLs are under /media/<key>
+    if (pathWithoutLeadingSlash.startsWith("media/")) {
+      pathWithoutLeadingSlash = pathWithoutLeadingSlash.substring("media/".length);
+    }
 
     // Decode URL-encoded parts
     // Split by '/' to decode each part separately (roomId and fileName)
@@ -123,6 +165,16 @@ export async function validateAudioFileExists(
     if (!key) {
       console.error(`Could not extract key from URL: ${audioUrl}`);
       return false;
+    }
+
+    if (isLocalProvider()) {
+      const fullPath = path.join(LOCAL_UPLOADS_DIR, key);
+      try {
+        const s = statSync(fullPath);
+        return s.isFile() && s.size > 0;
+      } catch {
+        return false;
+      }
     }
 
     // Perform HEAD request to check if object exists
@@ -177,6 +229,10 @@ export function generateAudioFileName(originalName: string): string {
  * Validate R2 configuration
  */
 export function validateR2Config(): { isValid: boolean; errors: string[] } {
+  if (isLocalProvider()) {
+    // Local mode doesn't require R2 config
+    return { isValid: true, errors: [] };
+  }
   const errors: string[] = [];
 
   for (const [key, value] of Object.entries(S3_CONFIG)) {
@@ -202,6 +258,35 @@ export async function listObjectsWithPrefix(
   options: { includeFolders?: boolean } = {}
 ) {
   try {
+    if (isLocalProvider()) {
+      const root = LOCAL_UPLOADS_DIR;
+      const results: { Key: string; Size?: number }[] = [];
+
+      async function walk(dir: string, rel: string) {
+        const entries = await fs.readdir(dir, { withFileTypes: true });
+        for (const entry of entries) {
+          const entryRel = path.join(rel, entry.name);
+          const entryAbs = path.join(dir, entry.name);
+          if (entry.isDirectory()) {
+            await walk(entryAbs, entryRel);
+          } else if (entry.isFile()) {
+            if (entryRel.startsWith(prefix)) {
+              const st = await fs.stat(entryAbs);
+              results.push({ Key: entryRel, Size: st.size });
+            }
+          }
+        }
+      }
+
+      await ensureDir(root);
+      await walk(root, "");
+
+      if (options.includeFolders) {
+        return results;
+      }
+      return results.filter((obj) => obj.Key && obj.Size && obj.Size > 0);
+    }
+
     const listCommand = new ListObjectsV2Command({
       Bucket: S3_CONFIG.BUCKET_NAME,
       Prefix: prefix,
@@ -293,6 +378,34 @@ export async function deleteObjectsWithPrefix(
   prefix: string = ""
 ): Promise<{ deletedCount: number }> {
   try {
+    if (isLocalProvider()) {
+      const root = LOCAL_UPLOADS_DIR;
+      const targetDir = path.join(root, prefix);
+
+      // Delete files recursively under targetDir
+      let deletedCount = 0;
+      async function rmrf(dir: string) {
+        try {
+          const entries = await fs.readdir(dir, { withFileTypes: true });
+          for (const entry of entries) {
+            const p = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+              await rmrf(p);
+            } else {
+              await fs.unlink(p);
+              deletedCount++;
+            }
+          }
+          await fs.rmdir(dir).catch(() => {});
+        } catch (e) {
+          // If dir doesn't exist, nothing to delete
+        }
+      }
+
+      await rmrf(targetDir);
+      return { deletedCount };
+    }
+
     const objects = await listObjectsWithPrefix(prefix, {
       includeFolders: true,
     }); // Include folders for deletion
@@ -371,6 +484,16 @@ export async function uploadFile(
 ): Promise<string> {
   const key = createKey(roomId, fileName);
 
+  if (isLocalProvider()) {
+    const dest = path.join(LOCAL_UPLOADS_DIR, key);
+    await ensureDir(path.dirname(dest));
+    // Use Bun to write efficiently
+    const file = Bun.file(filePath);
+    const buf = await file.arrayBuffer();
+    await Bun.write(dest, buf);
+    return getPublicAudioUrl(roomId, fileName);
+  }
+
   // Read file with Bun - it automatically detects content type
   const file = Bun.file(filePath);
   const buffer = await file.arrayBuffer();
@@ -403,6 +526,16 @@ export async function uploadBytes(
   // Convert ArrayBuffer to Uint8Array if needed
   const body = bytes instanceof ArrayBuffer ? new Uint8Array(bytes) : bytes;
 
+  if (isLocalProvider()) {
+    const dest = path.join(LOCAL_UPLOADS_DIR, key);
+    await ensureDir(path.dirname(dest));
+    // Write atomically: write to temp then rename
+    const tmp = `${dest}.tmp`;
+    await Bun.write(tmp, body);
+    await fs.rename(tmp, dest);
+    return getPublicAudioUrl(roomId, fileName);
+  }
+
   // Upload to R2
   const command = new PutObjectCommand({
     Bucket: S3_CONFIG.BUCKET_NAME,
@@ -423,6 +556,13 @@ export async function uploadBytes(
 export async function uploadJSON(key: string, data: object): Promise<void> {
   const jsonData = JSON.stringify(data, null, 2);
 
+  if (isLocalProvider()) {
+    const dest = path.join(LOCAL_BACKUP_DIR, key.replace(/^state-backup\//, ""));
+    await ensureDir(path.dirname(dest));
+    await Bun.write(dest, jsonData);
+    return;
+  }
+
   const command = new PutObjectCommand({
     Bucket: S3_CONFIG.BUCKET_NAME,
     Key: key,
@@ -438,6 +578,18 @@ export async function uploadJSON(key: string, data: object): Promise<void> {
  */
 export async function downloadJSON<T = any>(key: string): Promise<T | null> {
   try {
+    if (isLocalProvider()) {
+      const src = path.join(LOCAL_BACKUP_DIR, key.replace(/^state-backup\//, ""));
+      try {
+        const file = Bun.file(src);
+        if (!(await file.exists())) return null;
+        const jsonData = await file.text();
+        return JSON.parse(jsonData) as T;
+      } catch {
+        return null;
+      }
+    }
+
     const command = new GetObjectCommand({
       Bucket: S3_CONFIG.BUCKET_NAME,
       Key: key,
@@ -485,6 +637,14 @@ export async function getLatestFileWithPrefix(
  * Delete a single object from R2
  */
 export async function deleteObject(key: string): Promise<void> {
+  if (isLocalProvider()) {
+    const fullPath = path.join(LOCAL_BACKUP_DIR, key.replace(/^state-backup\//, ""));
+    try {
+      await fs.unlink(fullPath);
+    } catch {}
+    return;
+  }
+
   const command = new DeleteObjectCommand({
     Bucket: S3_CONFIG.BUCKET_NAME,
     Key: key,
@@ -545,12 +705,14 @@ export async function cleanupOrphanedRooms(
   };
 
   try {
-    // Validate R2 configuration
-    const r2Config = validateR2Config();
-    if (!r2Config.isValid) {
-      throw new Error(
-        `R2 configuration is invalid: ${r2Config.errors.join(", ")}`
-      );
+    // Local mode doesn't require R2 validation
+    if (!isLocalProvider()) {
+      const r2Config = validateR2Config();
+      if (!r2Config.isValid) {
+        throw new Error(
+          `R2 configuration is invalid: ${r2Config.errors.join(", ")}`
+        );
+      }
     }
 
     const roomObjects = await listObjectsWithPrefix("room-");
@@ -644,4 +806,45 @@ export async function cleanupOrphanedRooms(
     console.error("❌ Orphaned room cleanup failed:", error);
     throw error;
   }
+}
+
+/**
+ * Helper to expose provider in routes without changing imports elsewhere
+ */
+export function getStorageProvider(): "local" | "r2" {
+  return isLocalProvider() ? "local" : "r2";
+}
+
+/**
+ * For mapping default keys to public URLs (works in both providers)
+ */
+export function getPublicUrlForKey(key: string): string {
+  if (isLocalProvider()) {
+    // Ensure segments are encoded individually
+    const parts = key.split("/").map(encodeURIComponent);
+    return `/media/${parts.join("/")}`;
+  }
+  return `${S3_CONFIG.PUBLIC_URL}/${key}`;
+}
+
+// Resolve absolute local path for a given storage key (local provider only)
+export function resolveLocalPathForKey(key: string): string {
+  return path.join(LOCAL_UPLOADS_DIR, key);
+}
+
+// Small helper for routes to build direct upload URLs (local)
+export function buildLocalDirectUploadUrl(params: {
+  origin: string;
+  roomId: string;
+  fileName: string;
+  contentType: string;
+}): string {
+  const key = createKey(params.roomId, params.fileName);
+  const qs = new URLSearchParams({
+    roomId: params.roomId,
+    fileName: params.fileName,
+    contentType: params.contentType,
+    key,
+  }).toString();
+  return `${params.origin}/upload/direct?${qs}`;
 }

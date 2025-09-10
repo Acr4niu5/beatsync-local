@@ -1,8 +1,8 @@
-import { AudioSourceType, GetDefaultAudioType } from "@beatsync/shared";
-import { listObjectsWithPrefix } from "../lib/r2";
+import { GetDefaultAudioType } from "@beatsync/shared";
+import { getPublicUrlForKey, listObjectsWithPrefix } from "../lib/r2";
 import { jsonResponse, errorResponse } from "../utils/responses";
 
-export async function handleGetDefaultAudio(_req: Request) {
+export async function handleGetDefaultAudio(req: Request) {
   try {
     // List all objects with "default/" prefix
     const objects = await listObjectsWithPrefix("default/");
@@ -12,9 +12,12 @@ export async function handleGetDefaultAudio(_req: Request) {
     }
 
     // Map to array of objects with public URLs
-    const response: GetDefaultAudioType = objects.map((obj) => ({
-      url: `${process.env.S3_PUBLIC_URL}/${obj.Key}`,
-    }));
+    const origin = new URL(req.url).origin;
+    const response: GetDefaultAudioType = objects.map((obj) => {
+      let url = getPublicUrlForKey(obj.Key!);
+      if (url.startsWith("/")) url = origin + url;
+      return { url };
+    });
 
     return jsonResponse(response);
   } catch (error) {

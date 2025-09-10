@@ -6,10 +6,11 @@ import {
 } from "@beatsync/shared";
 import { Server } from "bun";
 import {
-  createKey,
+  buildLocalDirectUploadUrl,
   generateAudioFileName,
   generatePresignedUploadUrl,
   getPublicAudioUrl,
+  getStorageProvider,
   validateR2Config,
 } from "../lib/r2";
 import { globalManager } from "../managers";
@@ -22,11 +23,13 @@ export const handleGetPresignedURL = async (req: Request) => {
       return errorResponse("Method not allowed", 405);
     }
 
-    // Validate R2 configuration first
-    const r2Validation = validateR2Config();
-    if (!r2Validation.isValid) {
-      console.error("R2 configuration errors:", r2Validation.errors);
-      return errorResponse("R2 configuration not complete", 500);
+    // Validate R2 configuration only when provider is r2
+    if (getStorageProvider() === "r2") {
+      const r2Validation = validateR2Config();
+      if (!r2Validation.isValid) {
+        console.error("R2 configuration errors:", r2Validation.errors);
+        return errorResponse("R2 configuration not complete", 500);
+      }
     }
 
     const body = await req.json();
@@ -39,7 +42,7 @@ export const handleGetPresignedURL = async (req: Request) => {
       );
     }
 
-    const { roomId, fileName, contentType } = parseResult.data;
+  const { roomId, fileName, contentType } = parseResult.data;
 
     // Check if room exists
     const room = globalManager.getRoom(roomId);
@@ -52,17 +55,31 @@ export const handleGetPresignedURL = async (req: Request) => {
 
     // Generate unique filename
     const uniqueFileName = generateAudioFileName(fileName);
-    const r2Key = createKey(roomId, uniqueFileName);
+    // Generate upload URL and public URL depending on provider
+    let uploadUrl: string;
+    let publicUrl = getPublicAudioUrl(roomId, uniqueFileName);
 
-    // Generate presigned URL for upload
-    const uploadUrl = await generatePresignedUploadUrl(
-      roomId,
-      uniqueFileName,
-      contentType
-    );
-    const publicUrl = getPublicAudioUrl(roomId, uniqueFileName);
-
-    console.log(`Generated presigned URL for upload - R2 key: (${r2Key})`);
+    if (getStorageProvider() === "local") {
+      const origin = new URL(req.url).origin;
+      uploadUrl = buildLocalDirectUploadUrl({
+        origin,
+        roomId,
+        fileName: uniqueFileName,
+        contentType,
+      });
+      // Ensure public URL is absolute for clients on a different origin (Next.js dev server)
+      if (publicUrl.startsWith("/")) {
+        publicUrl = origin + publicUrl;
+      }
+      console.log(`Generated local direct upload URL for key room-${roomId}/${uniqueFileName}`);
+    } else {
+      uploadUrl = await generatePresignedUploadUrl(
+        roomId,
+        uniqueFileName,
+        contentType
+      );
+      console.log(`Generated presigned URL for R2 upload: room-${roomId}/${uniqueFileName}`);
+    }
 
     const response: UploadUrlResponseType = {
       uploadUrl,

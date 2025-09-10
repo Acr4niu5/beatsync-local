@@ -5,6 +5,8 @@ import { handleDiscover } from "./routes/discover";
 import { handleRoot } from "./routes/root";
 import { handleStats } from "./routes/stats";
 import { handleGetPresignedURL, handleUploadComplete } from "./routes/upload";
+import { handleDirectUpload } from "./routes/uploadLocal";
+import { handleMedia } from "./routes/media";
 import { handleWebSocketUpgrade } from "./routes/websocket";
 import {
   handleClose,
@@ -27,7 +29,7 @@ const server = Bun.serve<WSData, undefined>({
     }
 
     try {
-      switch (url.pathname) {
+  switch (url.pathname) {
         case "/":
           return handleRoot(req);
 
@@ -39,6 +41,9 @@ const server = Bun.serve<WSData, undefined>({
 
         case "/upload/complete":
           return handleUploadComplete(req, server);
+
+        case "/upload/direct":
+          return handleDirectUpload(req);
 
         case "/stats":
           return handleStats();
@@ -53,6 +58,9 @@ const server = Bun.serve<WSData, undefined>({
           return handleDiscover(req);
 
         default:
+          if (url.pathname.startsWith("/media/")) {
+            return handleMedia(req);
+          }
           return errorResponse("Not found", 404);
       }
     } catch (err) {

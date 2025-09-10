@@ -79,9 +79,16 @@ NEXT_PUBLIC_WS_URL=ws://localhost:8080/ws
 Create `.env` file in `apps/server/`:
 
 ```bash
-# Cloudflare R2 Configuration (required for audio uploads)
+# Storage Provider (local or r2)
+STORAGE_PROVIDER=local
+
+# Optional: Max upload size in bytes (default 104857600 = 100MB)
+MAX_UPLOAD_BYTES=104857600
+
+# When using R2 (set STORAGE_PROVIDER=r2), configure:
 S3_BUCKET_NAME=
 S3_PUBLIC_URL=
+S3_ENDPOINT=
 S3_ACCESS_KEY_ID=
 S3_SECRET_ACCESS_KEY=
 ```
