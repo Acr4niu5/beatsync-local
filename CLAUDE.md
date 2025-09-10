@@ -85,6 +85,9 @@ STORAGE_PROVIDER=local
 # Optional: Max upload size in bytes (default 104857600 = 100MB)
 MAX_UPLOAD_BYTES=104857600
 
+# Server port (default 8080)
+PORT=8080
+
 # When using R2 (set STORAGE_PROVIDER=r2), configure:
 S3_BUCKET_NAME=
 S3_PUBLIC_URL=

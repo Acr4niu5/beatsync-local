@@ -1,3 +1,5 @@
+import { config as dotenvConfig } from "dotenv";
+dotenvConfig();
 import { BackupManager } from "./managers/BackupManager";
 import { getActiveRooms } from "./routes/active";
 import { handleGetDefaultAudio } from "./routes/default";
@@ -17,9 +19,10 @@ import { corsHeaders, errorResponse } from "./utils/responses";
 import { WSData } from "./utils/websocket";
 
 // Bun.serve with WebSocket support
+const PORT = Number(process.env.PORT) || 8080;
 const server = Bun.serve<WSData, undefined>({
   hostname: "0.0.0.0",
-  port: 8080,
+  port: PORT,
   async fetch(req, server) {
     const url = new URL(req.url);
 
